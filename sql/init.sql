@@ -282,3 +282,168 @@ INSERT INTO `personal_account` (`personal_account_no`, `id_card`, `balance`, `fr
 ('BJ202401010000000002', '110101198505055678', 8650.00, 0.00, 8650.00, 54000.00, 45350.00, '2024-06-10', 'NORMAL'),
 ('BJ202401010000000003', '110101196012129012', 28900.80, 0.00, 28900.80, 120000.00, 91099.20, '2024-06-18', 'NORMAL'),
 ('BJ202401010000000004', '110101199508083456', 3200.00, 0.00, 3200.00, 8000.00, 4800.00, '2024-05-20', 'NORMAL');
+
+-- =====================================================
+-- 9. 外省报销单据表
+-- =====================================================
+DROP TABLE IF EXISTS `external_reimbursement_bill`;
+CREATE TABLE `external_reimbursement_bill` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `external_bill_no` varchar(64) NOT NULL COMMENT '外省单据号',
+  `hospital_code` varchar(32) NOT NULL COMMENT '医院编码',
+  `hospital_name` varchar(128) COMMENT '医院名称',
+  `province_code` varchar(16) COMMENT '省份编码',
+  `province_name` varchar(64) COMMENT '省份名称',
+  `id_card` varchar(32) NOT NULL COMMENT '身份证号',
+  `name` varchar(64) COMMENT '姓名',
+  `medical_type` varchar(16) COMMENT '就医类型(门诊/住院)',
+  `total_amount` decimal(12,2) DEFAULT 0 COMMENT '总费用',
+  `reimbursement_amount` decimal(12,2) DEFAULT 0 COMMENT '医保报销金额',
+  `personal_pay_amount` decimal(12,2) DEFAULT 0 COMMENT '个人支付金额',
+  `account_pay_amount` decimal(12,2) DEFAULT 0 COMMENT '个账支付金额',
+  `cash_pay_amount` decimal(12,2) DEFAULT 0 COMMENT '现金支付金额',
+  `treatment_date` date COMMENT '就医日期',
+  `discharge_date` date COMMENT '出院日期',
+  `diagnosis` varchar(512) COMMENT '诊断',
+  `invoice_no` varchar(64) COMMENT '发票号',
+  `bill_status` varchar(16) DEFAULT 'IMPORTED' COMMENT '单据状态(IMPORTED:已导入 RECONCILED:已对账 EXCEPTION:异常)',
+  `source_system` varchar(64) COMMENT '来源系统',
+  `import_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '导入时间',
+  `reconciliation_time` datetime COMMENT '对账时间',
+  `reconciliation_batch_no` varchar(64) COMMENT '对账批次号',
+  `remark` varchar(512) COMMENT '备注',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted` tinyint DEFAULT 0 COMMENT '逻辑删除标志',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_external_bill_no` (`external_bill_no`),
+  KEY `idx_hospital_code` (`hospital_code`),
+  KEY `idx_id_card` (`id_card`),
+  KEY `idx_treatment_date` (`treatment_date`),
+  KEY `idx_bill_status` (`bill_status`),
+  KEY `idx_reconciliation_batch_no` (`reconciliation_batch_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='外省报销单据表';
+
+-- =====================================================
+-- 10. 对账批次表
+-- =====================================================
+DROP TABLE IF EXISTS `reconciliation_batch`;
+CREATE TABLE `reconciliation_batch` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `batch_no` varchar(64) NOT NULL COMMENT '对账批次号',
+  `reconciliation_date` date NOT NULL COMMENT '对账日期',
+  `province_code` varchar(16) COMMENT '对账省份编码(为空则对账所有省份)',
+  `province_name` varchar(64) COMMENT '对账省份名称',
+  `total_bills` int DEFAULT 0 COMMENT '单据总数',
+  `matched_bills` int DEFAULT 0 COMMENT '对账一致数',
+  `mismatched_bills` int DEFAULT 0 COMMENT '对账不一致数',
+  `missing_local_bills` int DEFAULT 0 COMMENT '本地缺失单据数',
+  `missing_external_bills` int DEFAULT 0 COMMENT '外省缺失单据数',
+  `total_local_amount` decimal(15,2) DEFAULT 0 COMMENT '本地总金额',
+  `total_external_amount` decimal(15,2) DEFAULT 0 COMMENT '外省总金额',
+  `diff_amount` decimal(15,2) DEFAULT 0 COMMENT '差额',
+  `batch_status` varchar(16) DEFAULT 'PROCESSING' COMMENT '批次状态(PROCESSING:处理中 COMPLETED:已完成 FAILED:失败)',
+  `start_time` datetime COMMENT '开始时间',
+  `end_time` datetime COMMENT '结束时间',
+  `operator` varchar(64) COMMENT '操作人',
+  `remark` varchar(512) COMMENT '备注',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted` tinyint DEFAULT 0 COMMENT '逻辑删除标志',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_batch_no` (`batch_no`),
+  KEY `idx_reconciliation_date` (`reconciliation_date`),
+  KEY `idx_province_code` (`province_code`),
+  KEY `idx_batch_status` (`batch_status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对账批次表';
+
+-- =====================================================
+-- 11. 对账明细表
+-- =====================================================
+DROP TABLE IF EXISTS `reconciliation_detail`;
+CREATE TABLE `reconciliation_detail` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `batch_no` varchar(64) NOT NULL COMMENT '对账批次号',
+  `external_bill_no` varchar(64) COMMENT '外省单据号',
+  `local_settlement_no` varchar(64) COMMENT '本地结算单号',
+  `hospital_code` varchar(32) COMMENT '医院编码',
+  `id_card` varchar(32) COMMENT '身份证号',
+  `name` varchar(64) COMMENT '姓名',
+  `medical_type` varchar(16) COMMENT '就医类型',
+  `treatment_date` date COMMENT '就医日期',
+  `local_total_amount` decimal(12,2) DEFAULT 0 COMMENT '本地总金额',
+  `local_reimbursement_amount` decimal(12,2) DEFAULT 0 COMMENT '本地报销金额',
+  `local_personal_pay` decimal(12,2) DEFAULT 0 COMMENT '本地个人支付',
+  `external_total_amount` decimal(12,2) DEFAULT 0 COMMENT '外省总金额',
+  `external_reimbursement_amount` decimal(12,2) DEFAULT 0 COMMENT '外省报销金额',
+  `external_personal_pay` decimal(12,2) DEFAULT 0 COMMENT '外省个人支付',
+  `total_diff` decimal(12,2) DEFAULT 0 COMMENT '总金额差额',
+  `reimbursement_diff` decimal(12,2) DEFAULT 0 COMMENT '报销金额差额',
+  `personal_pay_diff` decimal(12,2) DEFAULT 0 COMMENT '个人支付差额',
+  `match_status` varchar(16) DEFAULT 'MATCHED' COMMENT '匹配状态(MATCHED:一致 MISMATCHED:不一致 MISSING_LOCAL:本地缺失 MISSING_EXTERNAL:外省缺失)',
+  `reconciliation_result` varchar(1024) COMMENT '对账结果说明',
+  `is_exception` tinyint DEFAULT 0 COMMENT '是否异常(0:否 1:是)',
+  `exception_handled` tinyint DEFAULT 0 COMMENT '异常是否已处理(0:否 1:是)',
+  `handler` varchar(64) COMMENT '处理人',
+  `handle_time` datetime COMMENT '处理时间',
+  `handle_remark` varchar(512) COMMENT '处理备注',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted` tinyint DEFAULT 0 COMMENT '逻辑删除标志',
+  PRIMARY KEY (`id`),
+  KEY `idx_batch_no` (`batch_no`),
+  KEY `idx_external_bill_no` (`external_bill_no`),
+  KEY `idx_local_settlement_no` (`local_settlement_no`),
+  KEY `idx_id_card` (`id_card`),
+  KEY `idx_match_status` (`match_status`),
+  KEY `idx_is_exception` (`is_exception`),
+  KEY `idx_exception_handled` (`exception_handled`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对账明细表';
+
+-- =====================================================
+-- 12. 对账异常表
+-- =====================================================
+DROP TABLE IF EXISTS `reconciliation_exception`;
+CREATE TABLE `reconciliation_exception` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+  `exception_no` varchar(64) NOT NULL COMMENT '异常编号',
+  `batch_no` varchar(64) NOT NULL COMMENT '对账批次号',
+  `reconciliation_detail_id` bigint COMMENT '对账明细ID',
+  `external_bill_no` varchar(64) COMMENT '外省单据号',
+  `local_settlement_no` varchar(64) COMMENT '本地结算单号',
+  `hospital_code` varchar(32) COMMENT '医院编码',
+  `hospital_name` varchar(128) COMMENT '医院名称',
+  `province_code` varchar(16) COMMENT '省份编码',
+  `province_name` varchar(64) COMMENT '省份名称',
+  `id_card` varchar(32) COMMENT '身份证号',
+  `name` varchar(64) COMMENT '姓名',
+  `medical_type` varchar(16) COMMENT '就医类型',
+  `treatment_date` date COMMENT '就医日期',
+  `exception_type` varchar(32) COMMENT '异常类型(AMOUNT_DIFF:金额不符 MISSING_LOCAL:本地缺失 MISSING_EXTERNAL:外省缺失 DUPLICATE:重复单据)',
+  `local_total_amount` decimal(12,2) DEFAULT 0 COMMENT '本地总金额',
+  `local_reimbursement_amount` decimal(12,2) DEFAULT 0 COMMENT '本地报销金额',
+  `external_total_amount` decimal(12,2) DEFAULT 0 COMMENT '外省总金额',
+  `external_reimbursement_amount` decimal(12,2) DEFAULT 0 COMMENT '外省报销金额',
+  `total_diff` decimal(12,2) DEFAULT 0 COMMENT '总金额差额',
+  `reimbursement_diff` decimal(12,2) DEFAULT 0 COMMENT '报销金额差额',
+  `exception_desc` varchar(1024) COMMENT '异常描述',
+  `exception_status` varchar(16) DEFAULT 'PENDING' COMMENT '异常状态(PENDING:待处理 PROCESSING:处理中 RESOLVED:已处理 CLOSED:已关闭)',
+  `handler` varchar(64) COMMENT '处理人',
+  `handle_time` datetime COMMENT '处理时间',
+  `handle_method` varchar(32) COMMENT '处理方式(ADJUST:调账 REFUND:退款 WRITE_OFF:核销 OTHER:其他)',
+  `handle_remark` varchar(512) COMMENT '处理备注',
+  `follow_up_person` varchar(64) COMMENT '跟进人',
+  `next_follow_up_date` date COMMENT '下次跟进日期',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `deleted` tinyint DEFAULT 0 COMMENT '逻辑删除标志',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_exception_no` (`exception_no`),
+  KEY `idx_batch_no` (`batch_no`),
+  KEY `idx_external_bill_no` (`external_bill_no`),
+  KEY `idx_local_settlement_no` (`local_settlement_no`),
+  KEY `idx_id_card` (`id_card`),
+  KEY `idx_exception_type` (`exception_type`),
+  KEY `idx_exception_status` (`exception_status`),
+  KEY `idx_handler` (`handler`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对账异常表';

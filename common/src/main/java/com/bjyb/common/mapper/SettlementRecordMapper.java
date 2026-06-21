@@ -5,9 +5,12 @@ import com.bjyb.common.entity.SettlementRecord;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.SelectProvider;
+import org.apache.ibatis.jdbc.SQL;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Mapper
 public interface SettlementRecordMapper extends BaseMapper<SettlementRecord> {
@@ -23,4 +26,24 @@ public interface SettlementRecordMapper extends BaseMapper<SettlementRecord> {
                                                @Param("policyCode") String policyCode,
                                                @Param("startTime") LocalDateTime startTime,
                                                @Param("endTime") LocalDateTime endTime);
+
+    @SelectProvider(type = SettlementRecordProvider.class, method = "selectByDateAndProvince")
+    List<SettlementRecord> selectByDateAndProvince(@Param("startTime") LocalDateTime startTime,
+                                                    @Param("endTime") LocalDateTime endTime,
+                                                    @Param("provinceCode") String provinceCode);
+
+    class SettlementRecordProvider {
+        public String selectByDateAndProvince() {
+            return new SQL() {{
+                SELECT("*");
+                FROM("settlement_record");
+                WHERE("settlement_time >= #{startTime}");
+                WHERE("settlement_time <= #{endTime}");
+                WHERE("settlement_status = '1'");
+                WHERE("deleted = 0");
+                WHERE("province_code = #{provinceCode} OR #{provinceCode} IS NULL OR #{provinceCode} = ''");
+                ORDER_BY("settlement_time DESC");
+            }}.toString();
+        }
+    }
 }

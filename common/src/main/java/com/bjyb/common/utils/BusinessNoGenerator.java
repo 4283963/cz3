@@ -24,4 +24,12 @@ public class BusinessNoGenerator {
     public static String generatePersonalAccountNo() {
         return "BJ" + DateUtil.format(DateUtil.date(), "yyyyMMdd") + RandomUtil.randomNumbers(10);
     }
+
+    public static String generateBatchNo() {
+        return "DZ" + DateUtil.format(DateUtil.date(), "yyyyMMddHHmmss") + RandomUtil.randomNumbers(6);
+    }
+
+    public static String generateExceptionNo() {
+        return "YC" + DateUtil.format(DateUtil.date(), "yyyyMMddHHmmss") + RandomUtil.randomNumbers(6);
+    }
 }
