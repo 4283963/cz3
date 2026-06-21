@@ -8,6 +8,7 @@ import com.bjyb.common.enums.FlowTypeEnum;
 import com.bjyb.common.enums.TransferStatusEnum;
 import com.bjyb.common.exception.BusinessException;
 import com.bjyb.common.mapper.*;
+import com.bjyb.common.utils.BigDecimalUtils;
 import com.bjyb.common.utils.BusinessNoGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,8 +47,10 @@ public class AccountTransferService {
 
         InsuredPerson insuredPerson = validateInsuredPerson(request.getIdCard(), request.getName());
         PersonalAccount account = validateAccount(request.getIdCard());
+        BigDecimal availableBalance = BigDecimalUtils.defaultIfNull(account.getAvailableBalance());
+        BigDecimal transferAmount = BigDecimalUtils.defaultIfNull(request.getTransferAmount());
 
-        validateTransferAmount(account, request.getTransferAmount());
+        validateTransferAmount(account, transferAmount);
 
         AccountTransferRecord transferRecord = new AccountTransferRecord();
         transferRecord.setTransferNo(BusinessNoGenerator.generateTransferNo());
@@ -58,8 +61,8 @@ public class AccountTransferService {
         transferRecord.setTargetProvinceName(request.getTargetProvinceName());
         transferRecord.setTargetInsuranceArea(request.getTargetInsuranceArea());
         transferRecord.setTargetAccountNo(request.getTargetAccountNo());
-        transferRecord.setTransferAmount(request.getTransferAmount());
-        transferRecord.setBalanceBeforeTransfer(account.getAvailableBalance());
+        transferRecord.setTransferAmount(transferAmount);
+        transferRecord.setBalanceBeforeTransfer(availableBalance);
         transferRecord.setTransferReason(request.getTransferReason());
         transferRecord.setApplyTime(LocalDateTime.now());
         transferRecord.setTransferStatus(TransferStatusEnum.PENDING_AUDIT.getCode());
@@ -68,7 +71,7 @@ public class AccountTransferService {
 
         transferRecordMapper.insert(transferRecord);
 
-        AccountTransferResponseDTO response = buildResponse(transferRecord, account.getAvailableBalance(), account.getAvailableBalance());
+        AccountTransferResponseDTO response = buildResponse(transferRecord, availableBalance, availableBalance);
 
         log.info("个账转移申请已提交，转移单号: {}", transferRecord.getTransferNo());
         return response;
@@ -106,24 +109,24 @@ public class AccountTransferService {
 
     @Transactional(rollbackFor = Exception.class)
     public AccountTransferResponseDTO executeTransfer(AccountTransferRecord transferRecord) {
-        log.info("开始执行个账转移，转移单号: {}, 转移金额: {}", transferRecord.getTransferNo(), transferRecord.getTransferAmount());
+        BigDecimal transferAmount = BigDecimalUtils.defaultIfNull(transferRecord.getTransferAmount());
+        log.info("开始执行个账转移，转移单号: {}, 转移金额: {}", transferRecord.getTransferNo(), transferAmount);
 
         PersonalAccount account = personalAccountMapper.selectByIdCard(transferRecord.getIdCard());
         if (account == null || !"NORMAL".equals(account.getAccountStatus())) {
             throw new BusinessException("个人账户状态异常，无法转移");
         }
 
-        BigDecimal balanceBefore = account.getAvailableBalance();
-        BigDecimal transferAmount = transferRecord.getTransferAmount();
+        BigDecimal balanceBefore = BigDecimalUtils.defaultIfNull(account.getAvailableBalance());
 
-        if (balanceBefore.compareTo(transferAmount) < 0) {
+        if (BigDecimalUtils.isLessThan(balanceBefore, transferAmount)) {
             throw new BusinessException("个人账户余额不足，当前余额: " + balanceBefore + ", 转移金额: " + transferAmount);
         }
 
         transferRecord.setTransferStatus(TransferStatusEnum.TRANSFERRING.getCode());
         transferRecordMapper.updateById(transferRecord);
 
-        BigDecimal balanceAfter = balanceBefore.subtract(transferAmount);
+        BigDecimal balanceAfter = BigDecimalUtils.safeSubtract(balanceBefore, transferAmount);
         int updateCount = personalAccountMapper.updateBalance(account.getId(), transferAmount, balanceAfter, balanceAfter);
         if (updateCount == 0) {
             throw new BusinessException("个人账户扣款失败，余额不足或状态异常");
@@ -133,13 +136,17 @@ public class AccountTransferService {
                 transferRecord.getTransferNo(), transferRecord.getTargetProvinceName());
 
         account = personalAccountMapper.selectById(account.getId());
+        if (account == null) {
+            throw new BusinessException("扣款后查询账户信息失败");
+        }
 
         boolean syncSuccess = syncBalanceToTargetProvince(transferRecord, account);
 
+        BigDecimal finalBalance = BigDecimalUtils.defaultIfNull(account.getAvailableBalance());
         if (syncSuccess) {
             transferRecord.setTransferStatus(TransferStatusEnum.TRANSFER_SUCCESS.getCode());
             transferRecord.setExternalTransferNo("EXT" + System.currentTimeMillis());
-            transferRecord.setBalanceAfterTransfer(account.getAvailableBalance());
+            transferRecord.setBalanceAfterTransfer(finalBalance);
             transferRecord.setTransferTime(LocalDateTime.now());
             log.info("个账转移成功，转移单号: {}, 外部流水号: {}", transferRecord.getTransferNo(), transferRecord.getExternalTransferNo());
         } else {
@@ -148,11 +155,12 @@ public class AccountTransferService {
             log.error("个账转移失败，转移单号: {}", transferRecord.getTransferNo());
 
             rollbackBalance(account, transferAmount);
+            finalBalance = balanceBefore;
         }
 
         transferRecordMapper.updateById(transferRecord);
 
-        return buildResponse(transferRecord, balanceBefore, account.getAvailableBalance());
+        return buildResponse(transferRecord, balanceBefore, finalBalance);
     }
 
     private boolean syncBalanceToTargetProvince(AccountTransferRecord transferRecord, PersonalAccount account) {
@@ -161,9 +169,9 @@ public class AccountTransferService {
             syncDTO.setSyncNo("SYNC" + System.currentTimeMillis());
             syncDTO.setIdCard(transferRecord.getIdCard());
             syncDTO.setPersonalAccountNo(account.getPersonalAccountNo());
-            syncDTO.setBalance(account.getBalance());
-            syncDTO.setAvailableBalance(account.getAvailableBalance());
-            syncDTO.setFrozenAmount(account.getFrozenAmount());
+            syncDTO.setBalance(BigDecimalUtils.defaultIfNull(account.getBalance()));
+            syncDTO.setAvailableBalance(BigDecimalUtils.defaultIfNull(account.getAvailableBalance()));
+            syncDTO.setFrozenAmount(BigDecimalUtils.defaultIfNull(account.getFrozenAmount()));
             syncDTO.setAccountStatus(account.getAccountStatus());
             syncDTO.setSyncTime(LocalDateTime.now());
             syncDTO.setSourceSystem("BJ-MEDICAL-INSURANCE");
@@ -248,24 +256,27 @@ public class AccountTransferService {
         if (!"NORMAL".equals(account.getAccountStatus())) {
             throw new BusinessException("个人账户状态异常，当前状态: " + account.getAccountStatus());
         }
-        if (account.getFrozenAmount().compareTo(BigDecimal.ZERO) > 0) {
+        BigDecimal frozenAmount = BigDecimalUtils.defaultIfNull(account.getFrozenAmount());
+        if (BigDecimalUtils.isGreaterThan(frozenAmount, BigDecimal.ZERO)) {
             throw new BusinessException("个人账户存在冻结金额，无法转移");
         }
         return account;
     }
 
     private void validateTransferAmount(PersonalAccount account, BigDecimal transferAmount) {
-        if (transferAmount.compareTo(BigDecimal.ZERO) <= 0) {
+        if (BigDecimalUtils.isLessOrEqual(transferAmount, BigDecimal.ZERO)) {
             throw new BusinessException("转移金额必须大于0");
         }
-        if (transferAmount.compareTo(account.getAvailableBalance()) > 0) {
-            throw new BusinessException("转移金额不能超过账户可用余额，当前可用余额: " + account.getAvailableBalance());
+        BigDecimal availableBalance = BigDecimalUtils.defaultIfNull(account.getAvailableBalance());
+        if (BigDecimalUtils.isGreaterThan(transferAmount, availableBalance)) {
+            throw new BusinessException("转移金额不能超过账户可用余额，当前可用余额: " + availableBalance);
         }
     }
 
     private void rollbackBalance(PersonalAccount account, BigDecimal amount) {
         try {
-            BigDecimal balanceAfter = account.getBalance().add(amount);
+            BigDecimal currentBalance = BigDecimalUtils.defaultIfNull(account.getBalance());
+            BigDecimal balanceAfter = BigDecimalUtils.safeAdd(currentBalance, amount);
             personalAccountMapper.updateBalance(account.getId(), BigDecimal.ZERO.subtract(amount), balanceAfter, balanceAfter);
             log.info("个账转移失败，已回滚余额，账户: {}, 回滚金额: {}", account.getPersonalAccountNo(), amount);
         } catch (Exception e) {
@@ -280,9 +291,10 @@ public class AccountTransferService {
         flow.setPersonalAccountNo(account.getPersonalAccountNo());
         flow.setIdCard(account.getIdCard());
         flow.setFlowType(flowType.getCode());
-        flow.setAmount(amount);
-        flow.setBalanceBefore(account.getBalance());
-        flow.setBalanceAfter(account.getBalance().subtract(amount));
+        flow.setAmount(BigDecimalUtils.defaultIfNull(amount));
+        BigDecimal accountBalance = BigDecimalUtils.defaultIfNull(account.getBalance());
+        flow.setBalanceBefore(accountBalance);
+        flow.setBalanceAfter(BigDecimalUtils.safeSubtract(accountBalance, amount));
         flow.setBusinessType(businessType);
         flow.setBusinessNo(businessNo);
         flow.setRelatedAccount(relatedAccount);

@@ -8,6 +8,7 @@ import com.bjyb.common.enums.FlowTypeEnum;
 import com.bjyb.common.exception.BusinessException;
 import com.bjyb.common.mapper.AccountFlowRecordMapper;
 import com.bjyb.common.mapper.PersonalAccountMapper;
+import com.bjyb.common.utils.BigDecimalUtils;
 import com.bjyb.common.utils.BusinessNoGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,23 +41,25 @@ public class BalanceSyncService {
             account = createNewAccount(syncDTO);
         }
 
-        BigDecimal oldBalance = account.getBalance();
-        BigDecimal newBalance = syncDTO.getBalance();
-        BigDecimal balanceDiff = newBalance.subtract(oldBalance);
+        BigDecimal oldBalance = BigDecimalUtils.defaultIfNull(account.getBalance());
+        BigDecimal newBalance = BigDecimalUtils.defaultIfNull(syncDTO.getBalance());
+        BigDecimal balanceDiff = BigDecimalUtils.safeSubtract(newBalance, oldBalance);
 
-        if (balanceDiff.compareTo(BigDecimal.ZERO) != 0) {
+        if (BigDecimalUtils.safeCompareTo(balanceDiff, BigDecimal.ZERO) != 0) {
             account.setBalance(newBalance);
-            account.setAvailableBalance(syncDTO.getAvailableBalance());
-            account.setFrozenAmount(syncDTO.getFrozenAmount());
+            account.setAvailableBalance(BigDecimalUtils.defaultIfNull(syncDTO.getAvailableBalance()));
+            account.setFrozenAmount(BigDecimalUtils.defaultIfNull(syncDTO.getFrozenAmount()));
             account.setAccountStatus(syncDTO.getAccountStatus());
             if (syncDTO.getLastSettlementDate() != null) {
                 account.setLastSettlementDate(syncDTO.getLastSettlementDate().toLocalDate());
             }
 
-            if (balanceDiff.compareTo(BigDecimal.ZERO) > 0) {
-                account.setTotalIncome(account.getTotalIncome().add(balanceDiff));
+            if (BigDecimalUtils.isGreaterThan(balanceDiff, BigDecimal.ZERO)) {
+                BigDecimal currentTotalIncome = BigDecimalUtils.defaultIfNull(account.getTotalIncome());
+                account.setTotalIncome(BigDecimalUtils.safeAdd(currentTotalIncome, balanceDiff));
             } else {
-                account.setTotalExpense(account.getTotalExpense().add(balanceDiff.abs()));
+                BigDecimal currentTotalExpense = BigDecimalUtils.defaultIfNull(account.getTotalExpense());
+                account.setTotalExpense(BigDecimalUtils.safeAdd(currentTotalExpense, balanceDiff.abs()));
             }
 
             personalAccountMapper.updateById(account);
@@ -75,10 +78,10 @@ public class BalanceSyncService {
         PersonalAccount account = new PersonalAccount();
         account.setPersonalAccountNo(syncDTO.getPersonalAccountNo());
         account.setIdCard(syncDTO.getIdCard());
-        account.setBalance(syncDTO.getBalance());
-        account.setAvailableBalance(syncDTO.getAvailableBalance());
-        account.setFrozenAmount(syncDTO.getFrozenAmount());
-        account.setTotalIncome(syncDTO.getBalance());
+        account.setBalance(BigDecimalUtils.defaultIfNull(syncDTO.getBalance()));
+        account.setAvailableBalance(BigDecimalUtils.defaultIfNull(syncDTO.getAvailableBalance()));
+        account.setFrozenAmount(BigDecimalUtils.defaultIfNull(syncDTO.getFrozenAmount()));
+        account.setTotalIncome(BigDecimalUtils.defaultIfNull(syncDTO.getBalance()));
         account.setTotalExpense(BigDecimal.ZERO);
         account.setAccountStatus(syncDTO.getAccountStatus());
         if (syncDTO.getLastSettlementDate() != null) {
@@ -96,17 +99,20 @@ public class BalanceSyncService {
         flow.setPersonalAccountNo(account.getPersonalAccountNo());
         flow.setIdCard(account.getIdCard());
 
-        if (amount.compareTo(BigDecimal.ZERO) > 0) {
+        BigDecimal safeAmount = BigDecimalUtils.defaultIfNull(amount);
+        BigDecimal accountBalance = BigDecimalUtils.defaultIfNull(account.getBalance());
+
+        if (BigDecimalUtils.isGreaterThan(safeAmount, BigDecimal.ZERO)) {
             flow.setFlowType(FlowTypeEnum.TRANSFER_IN.getCode());
-            flow.setAmount(amount);
-            flow.setBalanceBefore(account.getBalance().subtract(amount));
-            flow.setBalanceAfter(account.getBalance());
+            flow.setAmount(safeAmount);
+            flow.setBalanceBefore(BigDecimalUtils.safeSubtract(accountBalance, safeAmount));
+            flow.setBalanceAfter(accountBalance);
             flow.setBusinessType("跨省转入");
         } else {
             flow.setFlowType(FlowTypeEnum.TRANSFER_OUT.getCode());
-            flow.setAmount(amount.abs());
-            flow.setBalanceBefore(account.getBalance().add(amount.abs()));
-            flow.setBalanceAfter(account.getBalance());
+            flow.setAmount(safeAmount.abs());
+            flow.setBalanceBefore(BigDecimalUtils.safeAdd(accountBalance, safeAmount.abs()));
+            flow.setBalanceAfter(accountBalance);
             flow.setBusinessType("跨省转出");
         }
 

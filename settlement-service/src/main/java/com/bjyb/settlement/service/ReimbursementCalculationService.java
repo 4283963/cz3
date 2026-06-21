@@ -8,6 +8,7 @@ import com.bjyb.common.enums.FlowTypeEnum;
 import com.bjyb.common.enums.SettlementStatusEnum;
 import com.bjyb.common.exception.BusinessException;
 import com.bjyb.common.mapper.*;
+import com.bjyb.common.utils.BigDecimalUtils;
 import com.bjyb.common.utils.BusinessNoGenerator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -61,34 +62,42 @@ public class ReimbursementCalculationService {
         MedicalPolicy policy = findEffectivePolicy(insuredPerson.getInsuranceType(), request.getMedicalType());
         PersonalAccount account = personalAccountMapper.selectByIdCard(request.getIdCard());
 
-        if (account == null || !"NORMAL".equals(account.getAccountStatus())) {
+        if (account == null) {
+            log.info("参保人{}尚未开立个人账户，按余额0处理", insuredPerson.getName());
+            account = createDefaultAccount(insuredPerson);
+        }
+
+        if (!"NORMAL".equals(account.getAccountStatus())) {
             throw new BusinessException("个人账户状态异常，无法结算");
         }
 
-        BigDecimal accountBalanceBefore = account.getAvailableBalance();
+        BigDecimal accountBalanceBefore = BigDecimalUtils.defaultIfNull(account.getAvailableBalance());
         log.info("参保人: {}, 医保类型: {}, 账户可用余额: {}", insuredPerson.getName(), insuredPerson.getInsuranceType(), accountBalanceBefore);
 
         String treatmentType = convertMedicalType(request.getMedicalType());
         MedicalRecord medicalRecord = createMedicalRecord(request, insuredPerson);
         SettlementRecord settlement = calculateReimbursement(request, insuredPerson, policy, medicalRecord);
 
-        BigDecimal personalPayAmount = settlement.getPersonalAccountPay();
-        if (personalPayAmount.compareTo(BigDecimal.ZERO) > 0) {
-            if (accountBalanceBefore.compareTo(personalPayAmount) < 0) {
-                BigDecimal cashPay = personalPayAmount.subtract(accountBalanceBefore);
+        BigDecimal personalPayAmount = BigDecimalUtils.defaultIfNull(settlement.getPersonalAccountPay());
+        if (BigDecimalUtils.isGreaterThan(personalPayAmount, BigDecimal.ZERO)) {
+            if (BigDecimalUtils.isLessThan(accountBalanceBefore, personalPayAmount)) {
+                BigDecimal cashPay = BigDecimalUtils.safeSubtract(personalPayAmount, accountBalanceBefore);
                 settlement.setPersonalAccountPay(accountBalanceBefore);
                 settlement.setCashPay(cashPay);
                 personalPayAmount = accountBalanceBefore;
                 log.info("个账余额不足，个账支付: {}, 现金支付: {}", accountBalanceBefore, cashPay);
             }
 
-            if (personalPayAmount.compareTo(BigDecimal.ZERO) > 0) {
+            if (BigDecimalUtils.isGreaterThan(personalPayAmount, BigDecimal.ZERO)) {
                 int updateCount = personalAccountMapper.deductBalance(account.getId(), personalPayAmount);
                 if (updateCount == 0) {
                     throw new BusinessException("个人账户扣款失败，余额不足或状态异常");
                 }
 
                 account = personalAccountMapper.selectById(account.getId());
+                if (account == null) {
+                    throw new BusinessException("扣款后查询账户信息失败");
+                }
                 createAccountFlow(account, personalPayAmount, FlowTypeEnum.EXPENSE, "结算支付", settlement.getSettlementNo(), request.getHospitalCode());
             }
         }
@@ -100,7 +109,8 @@ public class ReimbursementCalculationService {
         medicalRecord.setRecordStatus("SETTLED");
         medicalRecordMapper.updateById(medicalRecord);
 
-        SettlementResponseDTO response = buildResponse(request, settlement, policy, accountBalanceBefore, account.getAvailableBalance());
+        BigDecimal accountBalanceAfter = BigDecimalUtils.defaultIfNull(account.getAvailableBalance());
+        SettlementResponseDTO response = buildResponse(request, settlement, policy, accountBalanceBefore, accountBalanceAfter);
 
         log.info("异地结算完成，结算单号: {}, 报销金额: {}, 个账支付: {}", settlement.getSettlementNo(), settlement.getReimbursementAmount(), settlement.getPersonalAccountPay());
         return response;
@@ -181,40 +191,47 @@ public class ReimbursementCalculationService {
     private SettlementRecord calculateReimbursement(SettlementRequestDTO request, InsuredPerson insuredPerson,
                                                     MedicalPolicy policy, MedicalRecord medicalRecord) {
         CrossProvinceHospital hospital = hospitalMapper.selectByHospitalCode(request.getHospitalCode());
-        BigDecimal totalAmount = request.getTotalAmount();
-        BigDecimal deductible = policy.getDeductible();
-        BigDecimal ratio = policy.getReimbursementRatio().divide(new BigDecimal("100"), 4, RoundingMode.HALF_UP);
-        BigDecimal maxAmount = policy.getMaxReimbursementAmount();
+        BigDecimal totalAmount = BigDecimalUtils.defaultIfNull(request.getTotalAmount());
+        BigDecimal deductible = BigDecimalUtils.defaultIfNull(policy.getDeductible());
+        BigDecimal ratio = BigDecimalUtils.safeDivide(policy.getReimbursementRatio(), new BigDecimal("100"), 4, RoundingMode.HALF_UP);
+        BigDecimal maxAmount = BigDecimalUtils.defaultIfNull(policy.getMaxReimbursementAmount());
 
         LocalDateTime yearStart = LocalDateTime.of(LocalDate.now().withMonth(1).withDayOfMonth(1), LocalTime.MIN);
         LocalDateTime yearEnd = LocalDateTime.of(LocalDate.now().withMonth(12).withDayOfMonth(31), LocalTime.MAX);
-        BigDecimal yearReimbursed = settlementRecordMapper.sumReimbursementByPolicyAndYear(
-                insuredPerson.getIdCard(), policy.getPolicyCode(), yearStart, yearEnd);
-        BigDecimal remainingQuota = maxAmount.subtract(yearReimbursed);
+        BigDecimal yearReimbursed = BigDecimalUtils.defaultIfNull(settlementRecordMapper.sumReimbursementByPolicyAndYear(
+                insuredPerson.getIdCard(), policy.getPolicyCode(), yearStart, yearEnd));
+        BigDecimal remainingQuota = BigDecimalUtils.safeSubtract(maxAmount, yearReimbursed);
 
         BigDecimal selfPayAmount = calculateSelfPayAmount(request);
-        BigDecimal withinScopeAmount = totalAmount.subtract(selfPayAmount);
+        BigDecimal withinScopeAmount = BigDecimalUtils.safeSubtract(totalAmount, selfPayAmount);
+        if (BigDecimalUtils.isNegative(withinScopeAmount)) {
+            withinScopeAmount = BigDecimal.ZERO;
+        }
 
         BigDecimal deductibleAmount = BigDecimal.ZERO;
-        if (withinScopeAmount.compareTo(deductible) > 0) {
+        if (BigDecimalUtils.isGreaterThan(withinScopeAmount, deductible)) {
             deductibleAmount = deductible;
         } else {
             deductibleAmount = withinScopeAmount;
         }
 
-        BigDecimal reimbursementBase = withinScopeAmount.subtract(deductibleAmount);
+        BigDecimal reimbursementBase = BigDecimalUtils.safeSubtract(withinScopeAmount, deductibleAmount);
         BigDecimal reimbursementAmount = reimbursementBase.multiply(ratio).setScale(2, RoundingMode.HALF_UP);
+        reimbursementAmount = BigDecimalUtils.defaultIfNull(reimbursementAmount, BigDecimal.ZERO);
 
-        if (reimbursementAmount.compareTo(remainingQuota) > 0) {
+        if (BigDecimalUtils.isGreaterThan(reimbursementAmount, remainingQuota)) {
             reimbursementAmount = remainingQuota;
             log.info("超出年度最高支付限额，按限额报销: {}", reimbursementAmount);
         }
 
-        if (reimbursementAmount.compareTo(BigDecimal.ZERO) < 0) {
+        if (BigDecimalUtils.isNegative(reimbursementAmount)) {
             reimbursementAmount = BigDecimal.ZERO;
         }
 
-        BigDecimal personalAccountPay = totalAmount.subtract(reimbursementAmount);
+        BigDecimal personalAccountPay = BigDecimalUtils.safeSubtract(totalAmount, reimbursementAmount);
+        if (BigDecimalUtils.isNegative(personalAccountPay)) {
+            personalAccountPay = BigDecimal.ZERO;
+        }
 
         SettlementRecord settlement = new SettlementRecord();
         settlement.setSettlementNo(BusinessNoGenerator.generateSettlementNo());
@@ -252,13 +269,30 @@ public class ReimbursementCalculationService {
         if (request.getTreatmentItems() != null && !request.getTreatmentItems().isEmpty()) {
             for (TreatmentItemDTO item : request.getTreatmentItems()) {
                 if ("N".equals(item.getWithinScope())) {
-                    selfPayAmount = selfPayAmount.add(item.getAmount());
+                    BigDecimal itemAmount = BigDecimalUtils.defaultIfNull(item.getAmount());
+                    selfPayAmount = selfPayAmount.add(itemAmount);
                 }
             }
         } else {
-            selfPayAmount = request.getTotalAmount().multiply(new BigDecimal("0.15")).setScale(2, RoundingMode.HALF_UP);
+            BigDecimal totalAmount = BigDecimalUtils.defaultIfNull(request.getTotalAmount());
+            selfPayAmount = totalAmount.multiply(new BigDecimal("0.15")).setScale(2, RoundingMode.HALF_UP);
         }
         return selfPayAmount;
+    }
+
+    private PersonalAccount createDefaultAccount(InsuredPerson insuredPerson) {
+        PersonalAccount account = new PersonalAccount();
+        account.setPersonalAccountNo(BusinessNoGenerator.generatePersonalAccountNo());
+        account.setIdCard(insuredPerson.getIdCard());
+        account.setBalance(BigDecimal.ZERO);
+        account.setFrozenAmount(BigDecimal.ZERO);
+        account.setAvailableBalance(BigDecimal.ZERO);
+        account.setTotalIncome(BigDecimal.ZERO);
+        account.setTotalExpense(BigDecimal.ZERO);
+        account.setAccountStatus("NORMAL");
+        personalAccountMapper.insert(account);
+        log.info("为参保人{}创建默认个人账户，账号: {}", insuredPerson.getName(), account.getPersonalAccountNo());
+        return account;
     }
 
     private void createAccountFlow(PersonalAccount account, BigDecimal amount, FlowTypeEnum flowType,
@@ -268,9 +302,10 @@ public class ReimbursementCalculationService {
         flow.setPersonalAccountNo(account.getPersonalAccountNo());
         flow.setIdCard(account.getIdCard());
         flow.setFlowType(flowType.getCode());
-        flow.setAmount(amount);
-        flow.setBalanceBefore(account.getBalance().add(amount));
-        flow.setBalanceAfter(account.getBalance());
+        flow.setAmount(BigDecimalUtils.defaultIfNull(amount));
+        BigDecimal accountBalance = BigDecimalUtils.defaultIfNull(account.getBalance());
+        flow.setBalanceBefore(BigDecimalUtils.safeAdd(accountBalance, amount));
+        flow.setBalanceAfter(accountBalance);
         flow.setBusinessType(businessType);
         flow.setBusinessNo(businessNo);
         flow.setRelatedAccount(relatedAccount);
